@@ -8,17 +8,26 @@ import jsonschema
 import datetime as dt
 
 
+# Get base directory of the project
+def get_base_dir():
+	# Get the base directory of the project
+	return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 # validate the local report against the schema
 def validate_local_report(_sample_dict):
 	# open the schema file and store in the 'schema_data' variable
-	with open('./resources/graph-based-malware-db-json.schema', 'r') as schema_file:
+	with open(os.path.join(get_base_dir(), 'config', 'graph-based-malware-db-json.schema'), 'r') as schema_file:
 		schema_data = json.load(schema_file)
 	# validate the sample dictionary against the schema
 	try:
 		jsonschema.validate(instance=_sample_dict, schema=schema_data)
 		print("Validation successfull!")
 		# write the sample features dictionary to a JSON file
-		_path = (f"./outputs/local_reports/{_sample_dict['architecture']}/{_sample_dict['sha256']}.json")
+		_path = (
+			#os.path.join(get_base_dir(), 'output', 'local_reports', _sample_dict['architecture'], f"{_sample_dict['sha256']}.json")
+			os.path.join(get_base_dir(), 'output', 'local_reports', f"{_sample_dict['sha256']}.json")
+		)
 		with open(_path, 'w') as report_file:
 			json.dump(_sample_dict, report_file, indent=4)
 		print(f"Data written to {_sample_dict['sha256']}.json file")
@@ -89,11 +98,11 @@ def cputype_extractor(_sample):
 			return 'MIPS'
 		# if the CPU type is not ARM or MIPS, print 'UNKNOWN' and the CPU type
 		else:
-			print('UNKNOWN:',_tags['EXE:CPUType'])
+			print(f'{_sample} is UNKNOWN:', _tags['EXE:CPUType'])
 	# if the CPU type is not found, print 'Command failed with an error: Bad tag: EXE:CPUType'
 	except KeyError as e:
-		print(f"Command failed with an error: Bad tag: {e}")
-		raise e
+		print(f"Command failed with an error: Bad tag: {e}. The {_sample} is probably not an ELF file.")
+		# raise e
 
 
 # extract the architecture of the sample (32-bit or 64-bit)
@@ -241,7 +250,7 @@ def main(_node, _directory, _response_data = None, _label_extract_type = 0):
 		sample_dict.update({
 				'av_labels_generation_date': date_converter(_response_data['data']['attributes']['last_analysis_date']),
 				'positive_security_analysis': _response_data['data']['attributes']['last_analysis_stats']['malicious'],
-				'avclass_labels': label_extractor(avclass_extractor(f"./outputs/VT_reports/{_node}.json"), _label_extract_type),
+				'avclass_labels': label_extractor(avclass_extractor(os.path.join(get_base_dir(), "output", "VT_reports", sample_dict['sha256'] + '.json')), _label_extract_type),
 				'first_submission_date': date_converter(_response_data['data']['attributes']['first_submission_date'])
 		})
 

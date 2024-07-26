@@ -1,4 +1,4 @@
-import networkx as nx
+import os
 import extractor as ex
 from py2neo import Graph, Node, Relationship, Transaction, Subgraph, NodeMatcher, RelationshipMatcher
 import json
@@ -8,6 +8,12 @@ import time
 import logging
 import datetime as dt
 import init_graph as ig
+
+
+# Get base directory of the project
+def get_base_dir():
+	# Get the base directory of the project
+	return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Check how many API calls are left for the day
@@ -50,15 +56,16 @@ def check_first_submission_date(py2neo_graph, vt_header):
 			response = requests.get(url, headers=vt_header)
 		report_data = response.json()
 		# Save the VirusTotal report
-		with open(f"./outputs/VT_reports/{vertex['sha256']}.json", "w") as json_file:
+		with open(os.path.join(get_base_dir(), f"output/VT_reports/{vertex['sha256']}.json"), "w") as json_file:
 			json.dump(report_data, json_file)
 		# Convert the timestamp to a legit format for neo4j
 		new_first_submission_date = ex.date_converter(report_data['data']['attributes']['first_submission_date'])
 		# Update the py2neo_graph
 		vertex['first_submission_date'] = new_first_submission_date
 		# Update the local report
-		with open (f"./outputs/local_reports/{vertex['architecture']}/{vertex['sha256']}.json", "r") as json_file:
-				local_data = json.load(json_file)
+		# with open (os.path.join(get_base_dir(), f"output/local_reports/{vertex['architecture']}/{vertex['sha256']}.json"), "r") as json_file:
+		with open (os.path.join(get_base_dir(), f"output/local_reports/{vertex['sha256']}.json"), "r") as json_file:
+			local_data = json.load(json_file)
 		local_data['first_submission_date'] = new_first_submission_date
 		# Save the updated local report
 		ex.validate_local_report(local_data)
@@ -68,8 +75,13 @@ def check_first_submission_date(py2neo_graph, vt_header):
 
 # Get the VirusTotal report for each node with the label 'Incomplete' and update these nodes with the new attributes
 def complete_node(py2neo_graph, vt_header):
-	# Configure logging
-	logging.basicConfig(filename="./outputs/logs/graph_maintenance.log", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
+	# Get the base directory of the project
+	log_dir = os.path.join(get_base_dir(), "logs")
+	# Create the logs directory if it does not exist
+	os.makedirs(log_dir, exist_ok=True)
+	# Configure the logging
+	logging.basicConfig(filename = os.path.join(log_dir, "graph_maintenance.log"), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
+	logging.info("The graph maintenance process has started to complete Incomplete labelled nodes.")
 	# List of vertices of the graph woth tha label 'Incomplete'
 	vertices_incomplete = py2neo_graph.nodes.match("Incomplete")
 	for vertex in vertices_incomplete:
@@ -85,13 +97,14 @@ def complete_node(py2neo_graph, vt_header):
 		# If the node have a VirusTotal report, then:
 		if response.status_code == 200:
 			# Save the VirusTotal report
-			with open(f"./outputs/VT_reports/{vertex['sha256']}.json", "w") as json_file:
+			with open(os.path.join(get_base_dir(), f"output/VT_reports/{vertex['sha256']}.json"), "w") as json_file:
 				json.dump(report_data, json_file)
 			# If the file is malicious
 			if (report_data['data']['attributes']['last_analysis_stats']['malicious'] > 5):
-				avclass_labels = ex.avclass_extractor(f"./outputs/VT_reports/{vertex['sha256']}.json")
+				avclass_labels = ex.avclass_extractor(os.path.join(get_base_dir(), f"output/VT_reports/{vertex['sha256']}.json"))
 				# Update and save the local report
-				with open (f"./outputs/local_reports/{vertex['architecture']}/{vertex['sha256']}.json", "r") as json_file:
+				# with open (os.path.join(get_base_dir(), f"output/local_reports/{vertex['architecture']}/{vertex['sha256']}.json"), "r") as json_file:
+				with open (os.path.join(get_base_dir(), f"output/local_reports/{vertex['sha256']}.json"), "r") as json_file:
 					local_report_data = json.load(json_file)
 					update_dictionary = {
 							"av_labels_generation_date": ex.date_converter(report_data['data']['attributes']['last_analysis_date']),
@@ -111,6 +124,7 @@ def complete_node(py2neo_graph, vt_header):
 				vertex.remove_label("Incomplete")
 				py2neo_graph.push(vertex)
 				py2neo_graph.run("MATCH (n{sha256: '%s'}) REMOVE n:Incomplete" % (vertex['sha256']))
+				logging.info(f"The node {vertex['sha256']} is updated.")
 			# If the file is not malicious
 			else:
 				# Delete node
@@ -125,12 +139,14 @@ def complete_node(py2neo_graph, vt_header):
 			py2neo_graph.delete(vertex)
 			# Log the deleted node
 			logging.info(f"[404] This node needs to be deleted: {vertex['sha256']}")
+	logging.info("The graph maintenance process has finished to complete Incomplete labelled nodes.")
 
 
 # Check the nodes with the label 'Complete' and the attribute 'positive_security_analysis' less than 10 and reanalyze these nodes to check if they are truly malicious
 def check_insecure_samples(py2neo_graph, vt_header):
 	# Configure logging
 	logging.basicConfig(filename="graph_maintenance.log", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
+	logging.info("The graph maintanance process has started to check insecure samples.")
 	# List of vertices
 	vertex_insecure = []
 	# Cypher query to get the nodes with the label 'Complete' and the attribute 'positive_security_analysis' less than 10
@@ -183,7 +199,7 @@ def check_insecure_samples(py2neo_graph, vt_header):
 				print(analysis_data)
 
 			# save the VirusTotal analysis report
-			with open(f"./outputs/VT_analyses/{vertex['sha256']}.json", "w") as json_file:
+			with open(os.path.join(get_base_dir(), f"output/VT_analyses/{vertex['sha256']}.json"), "w") as json_file:
 				json.dump(analysis_data, json_file)
 
 			# if the file malicious
@@ -201,12 +217,13 @@ def check_insecure_samples(py2neo_graph, vt_header):
 				# if the report is successfully downloaded from VirusTotal
 				if response.status_code == 200:
 					# saving the report
-					with open(f"./outputs/VT_reports/{vertex['sha256']}.json", "w") as json_file:
+					with open(os.path.join(get_base_dir(), f"output/VT_reports/{vertex['sha256']}.json"), "w") as json_file:
 						json.dump(report_data, json_file)
 					# updating the node
-					avclass_labels = ex.avclass_extractor(f"./outputs/VT_reports/{vertex['sha256']}.json")
+					avclass_labels = ex.avclass_extractor(os.path.join(get_base_dir(), f"output/VT_reports/{vertex['sha256']}.json"))
 					# update and save the local report
-					with open (f"./outputs/local_reports/{vertex['architecture']}/{vertex['sha256']}.json") as json_file:
+					# with open (os.path.join(get_base_dir(), f"output/local_reports/{vertex['architecture']}/{vertex['sha256']}.json"), "r") as json_file:
+					with open (os.path.join(get_base_dir(), f"output/local_reports/{vertex['sha256']}.json"), "r") as json_file:
 						local_report_data = json.load(json_file)
 						update_dictionary = {
 								"av_labels_generation_date": ex.date_converter(analysis_data['data']['attributes']['date']),
@@ -235,9 +252,10 @@ def check_insecure_samples(py2neo_graph, vt_header):
 				delete_vertex = py2neo_graph.nodes.match("Complete", sha256=f"{vertex['sha256']}").first()
 				py2neo_graph.delete(delete_vertex)
 				logging.info(f"[Not Malware] This node needs to be deleted: {vertex['sha256']}")
+	logging.info("The graph maintanance process has finished to check insecure samples.")
 
 
-# 
+# Make relationships between the subgraph nodes and the incomplete nodes in the 'main' graph
 def make_relationships(_subNode, _existingVertices):
 	# List of tuples of hash pairs
 	hash_pairs = []
@@ -281,8 +299,8 @@ def sub(py2neo_graph):
 							relationship_from = Relationship(target_node, 'TLSH_DIFF', sample, weight=hash_pair[4])
 							tx.merge(relationship_to)
 							tx.merge(relationship_from)
-							tx.run("MATCH (n{sha256: '%s'}) REMOVE n:Sub" % (sample['sha256']))
-							tx.commit()
+						tx.run("MATCH (n{sha256: '%s'}) REMOVE n:Sub" % (sample['sha256']))
+						tx.commit()
 					except Exception as e:
 							print(e)
 							tx.rollback()

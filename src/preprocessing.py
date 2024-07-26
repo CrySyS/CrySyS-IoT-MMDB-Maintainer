@@ -12,7 +12,8 @@ def create_folder_tree():
 	# Generate a random UUID and convert to a string
 	dataset_id = str(uuid.uuid4())
 	# Define the base directory
-	base_dir = f"./resources/SORTED_DATASET_{date_str}_{dataset_id}"
+	dataset_dir = os.path.normpath(f"input/SORTED_DATASET_{date_str}_{dataset_id}")
+	base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), dataset_dir)
 	# Check if the specific base directory already exists
 	if os.path.exists(base_dir):
 		return f"Directory already exists: {base_dir}"
@@ -26,7 +27,7 @@ def create_folder_tree():
 		f"{base_dir}/Q2",
 		f"{base_dir}/NOT FOUND",
 		f"{base_dir}/NOT MALWARE",
-		f"{base_dir}/ALREADY PROCESSED"
+		f"{base_dir}/ALREADY PROCESSED",
 	]
 
 	# Create each directory
@@ -36,10 +37,26 @@ def create_folder_tree():
 	return base_dir
 
 
+def create_output_folders():
+	# Get the base directory of the project
+	base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+	# List of directories to create
+	directories = [
+		f"{base_dir}/output/local_reports",
+		f"{base_dir}/output/temp_graphs",
+		f"{base_dir}/output/VT_analyses",
+		f"{base_dir}/output/VT_reports",
+	]
+	# Create each directory
+	for directory in directories:
+		os.makedirs(directory, exist_ok=True)
+
+
 def move_files(source_folder, destination_folder):
 	# Check if the source folder exists
 	if not os.path.exists(source_folder):
-		print(f"Source folder '{source_folder}' does not exist.")
+		# Raise an exception if the source folder does not exist and provide a hint to the user to check the path in the 'config.ini' file.
+		raise Exception(f"Source folder '{source_folder}' does not exist. You may have entered an incorrect path to the dataset directory. Change the path in the 'config.ini' file.")
 	# Iterate through the files and subdirectories in the source folder using 'os.walk'
 	# root ~ the current directory that being scanned
 	# _ ~ list of subdirectories
@@ -126,15 +143,3 @@ def move_files_for_queue_one(root_folder, architecture):
 		# If it's a directory, skip it
 		else:
 			print(f"Skipped: {src_file} (Not a file)")
-
-
-def move_files_for_queue_two():
-	with open("./outputs/for_manual_process/queue_2.txt", "r") as file:
-		for line in file:
-			file_name = line.split("/")[4][0:64]
-
-			source_file = f"./resources/SortedDatasetD-1/ARM/{file_name}"
-			destination_file = f"./resources/SortedDatasetD-1/ARM_Q2/{file_name}"
-			shutil.move(source_file, destination_file)
-	print("JOB DONE")
-

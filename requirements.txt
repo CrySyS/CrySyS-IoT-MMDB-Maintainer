@@ -1,0 +1,8 @@
+PyExifTool
+bintropy
+py2neo
+python-tlsh
+jsonschema
+avclass-malicialab
+networkx
+requests

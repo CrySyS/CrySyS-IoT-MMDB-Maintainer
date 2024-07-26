@@ -10,6 +10,13 @@ import requests
 import json
 import graph_maintenance as gm
 import logging
+import hashlib
+
+
+# Get base directory of the project
+def get_base_dir():
+	# Get the base directory of the project
+	return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Load the malware samples sha256 value
@@ -33,19 +40,19 @@ def uniqueness_test(a, b):
 
 
 # Function to create relationships between the new node and the existing vertices based on the TLSH values
-def make_relationships(_graphNeo, _newNode, _existingVertices, _directoryPath):
+def make_relationships(_graphNeo, _newNode, _existingVertices, _directoryPath, _threshold):
 	# List of tuples of hash pairs
 	hash_pairs = []
 	# The new node: sha256:tlsh pair
-	key1 = _newNode
-	value1 = tlsh.hash(open((os.path.join(_directoryPath, key1)), 'rb').read())
+	key1 = hashlib.sha256(open((os.path.join(_directoryPath, _newNode)), 'rb').read()).hexdigest()
+	value1 = tlsh.hash(open((os.path.join(_directoryPath, _newNode)), 'rb').read())
 	# Iterate through the existing vertices
 	for vertex in _existingVertices:
 		# The "existing" node sha256:tlsh pair
 		key2 = vertex['sha256']
 		value2 = vertex['tlsh']
 		# Compare the TLSH values of the new node and the existing node
-		if threshold(value1, value2):
+		if threshold(value1, value2, _threshold):
 			# Check if the two nodes are unique
 			if not uniqueness_test(key1, key2):
 				# Calculate the weight of the relationship based on the TLSH difference
@@ -57,56 +64,126 @@ def make_relationships(_graphNeo, _newNode, _existingVertices, _directoryPath):
 
 
 # Make neo4j graph from the NetworkX graph 
-def make_neo4j_graph(nx_graph, py2neo_graph):
+def make_neo4j_graph(py2neo_graph, bin_path, vt_path, arch, threshold):
+	# Get the base directory of the project
+	log_dir = os.path.join(get_base_dir(), "logs")
+	# Create the logs directory if it does not exist
+	os.makedirs(log_dir, exist_ok=True)
+	# Configure the logging
+	logging.basicConfig(filename = os.path.join(log_dir, "create_graph.log"), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
+	logging.info("The graph creation process has started.")
+	# Load the binaries with their path
+	binaries = []
+	for root_dir, _, filenames in os.walk(bin_path):
+		for filename in filenames:
+			# Append the binary to the list 
+			binaries.append(
+				{
+					"filename": filename,
+					"sha256": hashlib.sha256(open(os.path.join(root_dir, filename), 'rb').read()).hexdigest(),
+					"path": root_dir, 
+					"full_path": os.path.join(root_dir, filename),
+					"arch": ex.cputype_extractor(os.path.join(root_dir, filename))
+					}
+				)
+	# Create the graph
+	# because the graph is empty, we need to create the nodes and relationships from the binaries and their VirusTotal reports
+	for binary in binaries:
+		# print(binary)
+		if binary['arch'] != arch:
+			logging.info(f"Processing the {binary['sha256']} sample. The architecture of the sample is {binary['arch']}. But the architecture of the graph is {arch}.")
+			print(f"Processing the {binary['sha256']} sample. The architecture of the sample is {binary['arch']}. But the architecture of the graph is {arch}.")
+			continue
+		exit_loop = False
+		for root_dir, _, filenames in os.walk(vt_path):
+			log_this = True
+			# Exit the loop if the VirusTotal report is found
+			if exit_loop:
+				break
+			for filename in filenames:
+				# Check if the file is a VirusTotal report and the SHA-256 hash value is equal to the binary's hash value
+				if binary['sha256'] == filename.split('.')[0] and filename.endswith('.json'):
+					log_this = False
+					# Set the VirusTotal report path and exit the loop
+					vt_report_path = os.path.join(root_dir, filename)
+					exit_loop = True
+					# Load the VirusTotal report
+					with open(vt_report_path, "r") as json_file:
+						vt_report = json.load(json_file)
+					with open(os.path.join(get_base_dir(), f"output/VT_reports/{binary['sha256']}.json"), "w") as json_file:
+						json.dump(vt_report, json_file)
+					logging.info(f"The {binary['sha256']} sample has a VirusTotal report.")
+					print(f"The {binary['sha256']} sample has a VirusTotal report.")
 
-	# Save the NetworkX graph as a temporary file
-	temp_nx_graph = nx.DiGraph()
-	temp_nx_graph.add_nodes_from(nx_graph.nodes(data=True))
-	temp_nx_graph.add_edges_from(nx_graph.edges(data=True))
-	nx.write_gml(temp_nx_graph, "./resources/source_graph_arm_temp.gml")
+					# Get the metadata of the {binary} and save it to the local reports
+					metadata = ex.main(binary['filename'], binary['path'], vt_report, 2)
+					# Change the AV labels to the correct format to the neo4j database
+					metadata['avclass_labels'] = ex.label_extractor(metadata['avclass_labels'], 3)
+					# Merge the {binary} into the neo4j graph
+					tx = py2neo_graph.begin()
+					# All transactions(tx) will be a part of the "same" transaction to manage the consistency of the graph
+					# Create the node with the metadata and merge it to the neo4j graph
+					try: 
+						node = Node(*["Complete", "Node"], **metadata)
+						node.__primarylabel__ = "Node"
+						node.__primarykey__ = "sha256"
+						py2neo_graph.merge(node, "Node", "sha256")
+						tx.commit()
+						# Log the information and print the message to the console
+						print(f"Node {metadata['sha256']} is created.")
+						logging.info(f"Node {metadata['sha256']} is created.")
+					# If there is an exception, rollback the transaction and log the error
+					except Exception as e:
+						tx.rollback()
+						print(f"Failed to create the node {metadata['sha256']}. Error: {e}")
+						logging.warning(f"Failed to create the node {metadata['sha256']} because of a(n) {type(e)}: {e}.")
 
-	# Counter for saving
-	tr_num = 0
-
-	print("Start making nodes!")
-	# Iterate through nodes of the NetworkX graph and create corresponding nodes in Neo4j
-	for node_id, attributes in nx_graph.nodes(data=True):
-		labels = []
-		# Extract the labels from the avclass_labels attribute
-		for fam, vir in attributes['avclass_labels'].items():
-			labels.append(f"{fam}|{vir}")
-		# Add the avclass_labels attribute to the node
-		attributes.update({'avclass_labels': labels})
-		# Create the node with the extracted attributes and labels and merge it into the Neo4j graph
-		node = Node(*["Node", "Complete"], **attributes)
-		#node.__primarylabel__ = "Node"
-		#node.__primarykey__ = "sha256"
-		py2neo_graph.merge(node, "Node", "sha256")
-
-	print("Start making edges!")
-	# Iterate through edges of the NetworkX graph and create corresponding nodes in Neo4j
-	for source, target, attribute in nx_graph.edges(data=True):
-		# Increase the transaction number
-		tr_num = tr_num + 1
-		# Get the nodes of the edge
-		source_node = py2neo_graph.nodes.match("Node", sha256=source).first()
-		target_node = py2neo_graph.nodes.match("Node", sha256=target).first()
-		# Create the relationship and merge it into the Neo4j graph
-		relationship = Relationship(source_node, 'TLSH_DIFF', target_node, weight=attribute['weight'])
-		py2neo_graph.merge(relationship)
-		# Remove the edge from the temporary NetworkX graph to save memory and speed up the process
-		temp_nx_graph.remove_edge(source, target)
-		# Save the temporary NetworkX graph every 100000 transactions
-		if tr_num == 100000:
-			nx.write_gml(temp_nx_graph, "./resources/source_graph_arm_temp.gml")
-			tr_num = 0
+					# List of vertices of the graph with all of the records filled
+					query_result = py2neo_graph.nodes.match("Complete")
+					# Get the complete labelled nodes from the graph and create the relationships between the new node and the existing vertices
+					vertices_complete = [node for node in query_result]
+					hash_pairs = make_relationships(py2neo_graph, binary['filename'], vertices_complete, binary['path'], threshold)
+					tx = py2neo_graph.begin()
+					# All transactions(tx) will be a part of the "same" transaction to manage the consistency of the graph
+					# Create the relationships between the new node and the existing vertices
+					# The primary label of the nodes is "Node" and the primary key is "sha256" to avoid the duplication of the nodes
+					try:
+						for hash_pair in hash_pairs:
+							source_node = py2neo_graph.nodes.match("Complete", sha256=f"{hash_pair[0]}").first()
+							source_node.__primarylabel__ = "Node"
+							source_node.__primarykey__ = "sha256"
+							target_node = py2neo_graph.nodes.match("Complete", sha256=f"{hash_pair[2]}").first()
+							target_node.__primarylabel__ = "Node"
+							target_node.__primarykey__ = "sha256"
+							relationship_to = Relationship(source_node, 'TLSH_DIFF', target_node, weight=hash_pair[4])
+							relationship_from = Relationship(target_node, 'TLSH_DIFF', source_node, weight=hash_pair[4])
+							tx.merge(relationship_to)
+							tx.merge(relationship_from)
+						tx.commit()
+						print(f"The transaction commit has done for {binary['sha256']} sample.")
+						logging.info(f"The transaction commit has done for {binary['sha256']} sample.")
+					# If there is an exception, rollback the transaction and log the error
+					except Exception as e:
+						tx.rollback()
+						print(f"There was a(n) {type(e)}:", e)
+						logging.warning(f"There was a(n) {type(e)}: {e}.")
+					# Break the loop if the VirusTotal report is found and the relationships are created successfully
+					break
+		if log_this:
+			logging.info(f"The {binary['sha256']} sample has no VirusTotal report.")
+			print(f"The {binary['sha256']} sample has no VirusTotal report.")					
+	logging.info("The graph creation process has finished.")
 
 
 # Process the queue one
-def process_queue_one(py2neo_graph, dir_path):
-	# Configure logging
-	logging.basicConfig(filename="./outputs/logs/queue_one.log", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
-
+def process_queue_one(py2neo_graph, dir_path, threshold):
+	# Get the base directory of the project
+	log_dir = os.path.join(get_base_dir(), "logs")
+	# Create the logs directory if it does not exist
+	os.makedirs(log_dir, exist_ok=True)
+	# Configure the logging
+	logging.basicConfig(filename = os.path.join(log_dir, "queue_one.log"), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
+	logging.info("The queue one processing has started.")
 	# Define paths for the source and destination directories
 	src_path = dir_path + "/Q1"
 	dest_path_next = dir_path + "/Q2"
@@ -130,7 +207,7 @@ def process_queue_one(py2neo_graph, dir_path):
 			# Log the information
 			logging.info(f"SHA256: {sample} not in the py2neo_graph")
 			# Computing tlsh distance with complete labelled nodes and merge these relationships to the neo4j graph if the degree of the node is greater than 0
-			hash_pairs_complete = make_relationships(py2neo_graph, sample, vertices_complete, src_path)
+			hash_pairs_complete = make_relationships(py2neo_graph, sample, vertices_complete, src_path, threshold)
 			print(f"{sample} node has {len(hash_pairs_complete)} complete adjacent nodes.")
 			if (len(hash_pairs_complete) > 0):
 				# All transactions(tx) will be a part of the "same" transaction to manage the consistency of the graph
@@ -139,7 +216,7 @@ def process_queue_one(py2neo_graph, dir_path):
 					# Get the metadata of the {sample} and save it to the local reports
 					metadata = ex.main(sample, src_path)
 					# Merge the {sample} into the neo4j graph
-					source_node = Node(*["Incomplete", "Node", "Test"], **metadata)
+					source_node = Node(*["Incomplete", "Node"], **metadata)
 					source_node.__primarylabel__ = "Node"
 					source_node.__primarykey__ = "sha256"
 					# Merge the {sample} relationships with complete labelled nodes
@@ -154,7 +231,7 @@ def process_queue_one(py2neo_graph, dir_path):
 					# Computing hash pairs with incomplete labelled nodes and merge these relationships to the neo4j graph
 					query_result = py2neo_graph.nodes.match("Incomplete")
 					vertices_incomplete = [node for node in query_result]
-					hash_pairs_incomplete = make_relationships(py2neo_graph, sample, vertices_incomplete, src_path)
+					hash_pairs_incomplete = make_relationships(py2neo_graph, sample, vertices_incomplete, src_path, threshold)
 					print(f"{sample} node has {len(hash_pairs_incomplete)} incomplete adjacent nodes.")
 					for hash_pair in hash_pairs_incomplete:
 						target_node = py2neo_graph.nodes.match("Incomplete", sha256=f"{hash_pair[2]}").first()
@@ -201,12 +278,18 @@ def process_queue_one(py2neo_graph, dir_path):
 			except Exception as e:
 				print(f"Failed to move {sample}. Error: {e}")
 				logging.warning(f"Failed to move {sample} because of a(n) {type(e)}: {e}.")
+	logging.info("The queue one processing has finished.")
 
 
-def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
-	# Configure logging
-	logging.basicConfig(filename="./outputs/logs/queue_two.log", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
-
+# Process the queue two
+def process_queue_two(py2neo_graph, dir_path, vt_header, _threshold, nx_subgraph = None,):
+	# Get the base directory of the project
+	log_dir = os.path.join(get_base_dir(), "logs")
+	# Create the logs directory if it does not exist
+	os.makedirs(log_dir, exist_ok=True)
+	# Configure the logging
+	logging.basicConfig(filename = os.path.join(log_dir, "queue_two.log"), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
+	logging.info("The queue two processing has started.")
 	# Define paths
 	src_path = dir_path + "/Q2"
 	dest_path_na = dir_path + "/NOT FOUND"
@@ -228,7 +311,7 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 		# print(list(nx_subgraph.nodes(data="tlsh")))
 		# -->EDGES
 		for (key1, value1), (key2, value2) in combinations({key: value for key, value in list(nx_subgraph.nodes(data="tlsh"))}.items(), 2):
-			if threshold(value1, value2):
+			if threshold(value1, value2, _threshold):
 				print(key1, value1, key2, value2, tlsh.diff(value1, value2))
 				_weight = tlsh.diff(value1, value2)
 				nx_subgraph.add_edge(key1, key2, weight=_weight)
@@ -251,7 +334,7 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 		# Getting the VT reports using the dominating set
 		for dominating_node in dominating_set:
 			# Check if the report of the node is already downloaded or not
-			if dominating_node not in [filename.split('.')[0] for filename in os.listdir("./outputs/VT_reports/")]:
+			if dominating_node not in [filename.split('.')[0] for filename in os.listdir(os.path.join(get_base_dir(), "output", "VT_reports"))]:
 				# Get the VirusTotal report of the node using the VirusTotal API v3 
 				url = f"https://www.virustotal.com/api/v3/files/{dominating_node}"
 				response = requests.get(url, headers=vt_header)
@@ -267,7 +350,7 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 				if response.status_code == 200:
 					print(f"'{dominating_node}' has a successful VirusTotal report request.")
 					logging.info(f"{dominating_node} has a successful VirusTotal report request")
-					with open(f"./outputs/VT_reports/{dominating_node}.json", "w") as json_file:
+					with open(os.path.join(get_base_dir(), f"output/VT_reports/{dominating_node}.json"), "w") as json_file:
 						json.dump(report_data, json_file)
 					# If the node is not malware, because the sample has been reported as malicious by less than or equal to 5 antivirus engines, delete the node from the subgraph and move the sample to the benign directory
 					if (report_data['data']['attributes']['last_analysis_stats']['malicious']) <= 5:
@@ -292,9 +375,9 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 								print(f"Faild to move {sample}. Error: {e}")
 								logging.warning(f"Failed to move {sample} because of a(n) {type(e)}: {e}.")
 							# Save the subgraph to the local file and restart the dominating set calculation
-							if not (os.path.exists(f"./outputs/temp_graphs/queue_two/{date}/")):
-								os.makedirs(f"./outputs/temp_graphs/queue_two/{date}/", exist_ok=True)
-							nx.write_gml(nx_subgraph, f"./outputs/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml")
+							if not (os.path.exists(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"))):
+								os.makedirs(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"), exist_ok=True)
+							nx.write_gml(nx_subgraph, os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml"))
 							no_need_to_restart = 0
 							break
 					# If the node is malware, i.e. the sample has been reported as malicious by more than 5 antivirus engines, update the node with the VT reports needed attributes
@@ -325,9 +408,9 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 							print(f"Faild to move {sample}. Error: {e}")
 							logging.warning(f"Failed to move {sample} because of a(n) {type(e)}: {e}.")
 						# Save the subgraph to the local file and restart the dominating set calculation
-						if not (os.path.exists(f"./outputs/temp_graphs/queue_two/{date}/")):
-							os.makedirs(f"./outputs/temp_graphs/queue_two/{date}/", exist_ok=True)
-						nx.write_gml(nx_subgraph, f"./outputs/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml")
+						if not (os.path.exists(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"))):
+							os.makedirs(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"), exist_ok=True)
+						nx.write_gml(nx_subgraph, os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml"))
 						no_need_to_restart = 0
 						break
 			# If the report of the node is already downloaded, update the node with the VT reports needed attributes
@@ -335,7 +418,7 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 			else:
 				print(f"'{dominating_node}' has a downloaded VirusTotal report.")
 				logging.info(f"'{dominating_node}' has a downloaded VirusTotal report.")
-				with open(f"./outputs/VT_reports/{dominating_node}.json", "r") as json_file:
+				with open(os.path.join(get_base_dir(), f"output/VT_reports/{dominating_node}.json"), "r") as json_file:
 					report_data = json.load(json_file)
 				# If the node is not malware, because the sample has been reported as malicious by less than or equal to 5 antivirus engines, delete the node from the subgraph and move the sample to the benign directory
 				if (report_data['data']['attributes']['last_analysis_stats']['malicious']) <= 5:
@@ -359,9 +442,9 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 							print(f"Faild to move {sample}. Error: {e}")
 							logging.warning(f"Failed to move {sample} because of a(n) {type(e)}: {e}.")
 						# Save the subgraph to the local file and restart the dominating set calculation
-						if not (os.path.exists(f"./outputs/temp_graphs/queue_two/{date}/")):
-							os.makedirs(f"./outputs/temp_graphs/queue_two/{date}/")
-						nx.write_gml(nx_subgraph, f"./outputs/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml")
+						if not (os.path.exists(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"))):
+							os.makedirs(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"), exist_ok=True)
+						nx.write_gml(nx_subgraph, os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml"))
 						no_need_to_restart = 0
 						break
 				# Otherwise, update the attributes of the node using the VT reports.
@@ -375,18 +458,18 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 	all_nodes_without_attributes = [node for node in nx_subgraph.nodes() if 'sha256' not in nx_subgraph.nodes[node]]
 	for node in all_nodes_without_attributes:
 		# Check if the report of the node is already downloaded or not, if not and update the metadata based on that information
-		if node not in [report_name.split('.')[0] for report_name in os.listdir("./outputs/VT_reports")]:
+		if node not in [report_name.split('.')[0] for report_name in os.listdir(os.path.join(get_base_dir(), "output", "VT_reports"))]:
 			metadata = ex.main(node, src_path)
 			nx_subgraph.nodes[node].update(metadata)
 		else:
-			with open(f"./outputs/VT_reports/{node}.json", "r") as json_file:
+			with open(os.path.join(get_base_dir(), f"output/VT_reports/{node}.json"), "r") as json_file:
 				report_data = json.load(json_file)
 			metadata = ex.main(node, src_path, report_data, 2)
 			nx_subgraph.nodes[node].update(metadata)
 	# Save the subgraph to the local file for any furter verification processes
-	if not (os.path.exists(f"./outputs/temp_graphs/queue_two/{date}/")):
-		os.makedirs(f"./outputs/temp_graphs/queue_two/{date}/", exist_ok=True)
-	nx.write_gml(nx_subgraph, f"./outputs/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml")
+	if not (os.path.exists(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"))):
+		os.makedirs(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"), exist_ok=True)
+	nx.write_gml(nx_subgraph, os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml"))
 
 	# Get all nodes with all the attributes as a list of dictionaries
 	all_nodes_with_attributes = [nx_subgraph.nodes[node] for node in nx_subgraph.nodes]
@@ -455,8 +538,8 @@ def process_queue_two(py2neo_graph, dir_path, vt_header, nx_subgraph = None):
 			print(f"There was a(n) {type(e)}:", e, "Elapsed time is:", (finish_time - start_time))
 			logging.warning(f"There was a(n) {type(e)}: {e}. Elapsed time is: {finish_time - start_time}")
 	# Commit the transaction, save the graph and add the subgraph to the graph:
-	if not (os.path.exists(f"./outputs/temp_graphs/queue_two/{date}/")):
-		os.makedirs(f"./outputs/temp_graphs/queue_two/{date}/", exist_ok=True)
-	nx.write_gml(nx_subgraph, f"./outputs/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml")
+	if not (os.path.exists(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"))):
+		os.makedirs(os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/"), exist_ok=True)
+	nx.write_gml(nx_subgraph, os.path.join(get_base_dir(), f"output/temp_graphs/queue_two/{date}/queue_two-nx_sub_graph.gml"))
 	print("Graphed saved!")
-
+	logging.info("The queue two processing has finished.")
