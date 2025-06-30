@@ -1,4 +1,3 @@
-import re
 import os
 import uuid
 import shutil
@@ -13,7 +12,7 @@ def create_folder_tree():
 	dataset_id = str(uuid.uuid4())
 	# Define the base directory
 	dataset_dir = os.path.normpath(f"input/SORTED_DATASET_{date_str}_{dataset_id}")
-	base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), dataset_dir)
+	base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), dataset_dir)
 	# Check if the specific base directory already exists
 	if os.path.exists(base_dir):
 		return f"Directory already exists: {base_dir}"
@@ -43,7 +42,6 @@ def create_output_folders():
 	# List of directories to create
 	directories = [
 		f"{base_dir}/output/local_reports",
-		f"{base_dir}/output/temp_graphs",
 		f"{base_dir}/output/VT_analyses",
 		f"{base_dir}/output/VT_reports",
 	]
@@ -80,44 +78,14 @@ def move_files(source_folder, destination_folder):
 			# Check if the destination directory exists, if not create it
 			if not os.path.exists(destination_directory):
 				os.makedirs(destination_directory, exist_ok=True)
+			# Name the destination file based on the SHA-256 hash of the source file
+			sha256_hash = ex.hash_extractor(source_file)['sha256']
 			# Define the full path of the destination file
-			destination_file = os.path.join(destination_directory, file)
-			# Move the file to the destination directory
-			print(f"Moved: {source_file} -> {destination_file}")
-			# Move the file to the destination directory
-			shutil.move(source_file, destination_file)
-			# Check if the file is a valid SHA-256 hash
-			check_sha256(destination_file)
-
-
-# Function to check if the file name is a valid SHA-256 hash
-def check_sha256(file):
-	# Define a regular expression pattern to match a SHA-256 hash value
-	# re.compile is a method in Python that compiles a regular expression pattern into a regular expression object which can be used for regex-related operations
-	# The pattern ^[a-fA-F0-9]{64}$ matches a string that consists of exactly 64 characters, where each character is a hexadecimal digit (0-9, a-f, A-F)
-	sha256_pattern = re.compile(r"^[a-fA-F0-9]{64}$")
-	
-	# Split the file path into a list of directories and the file name
-	splitted_path = file.split("/")
-	# Get the index of the last part of the file path (the file name)
-	filename_idx = len(splitted_path) - 1
-	# Check if the last part of the file path (the file name) is a valid SHA-256 hash
-	is_sha256 = bool(sha256_pattern.match(splitted_path[filename_idx]))
-
-	if is_sha256:
-		print(f"'{splitted_path[filename_idx]}' is valid SHA-256 hash.")
-	# If the file name is not a valid SHA-256 hash, rename the file for the file SHA-256 hash
-	else:
-		print(f"'{splitted_path[filename_idx]}' is not valid SHA-256 hash.")
-		# Rename the file with the corresponding SHA-256 hash value
-		file_hashes = ex.hash_extractor(file)
-		# Replace the file name with the corresponding SHA-256 hash value
-		splitted_path[filename_idx] = file_hashes['sha256']
-		# Join the list of directories and the new file name to create the new file path
-		new_file = "/".join(splitted_path)
-		# Rename the file
-		os.rename(file, new_file)
-		print(f"Renamed: {file} -> {new_file}")
+			destination_file = os.path.join(destination_directory, sha256_hash)
+			# Create a soft link to the source file in the destination directory
+			os.symlink(source_file, destination_file, target_is_directory=False)
+			# Print the source and destination file paths for debugging purposes
+			print(f"Sym link created: {destination_file} -> {source_file}")
 
 
 # Function to move files to the correct folders for queue 1 based on the chosen architecture
@@ -135,11 +103,11 @@ def move_files_for_queue_one(root_folder, architecture):
 		if os.path.isfile(src_file):
 			try:
 				# Move the file to the destination directory
-				shutil.copy2(src_file, dest_file)
-				print(f"Copied: {src_file} to {dest_file}")
+				shutil.move(src_file, dest_file)
+				print(f"Moved: {src_file} to {dest_file}")
 			# If the copying fails, print an error message
 			except Exception as e:
-				print(f"Failed to copy {src_file}. Error: {e}")
+				print(f"Failed to move {src_file}. Error: {e}")
 		# If it's a directory, skip it
 		else:
 			print(f"Skipped: {src_file} (Not a file)")

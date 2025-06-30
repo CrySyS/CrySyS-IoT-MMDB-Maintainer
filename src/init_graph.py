@@ -16,7 +16,7 @@ import hashlib
 # Get base directory of the project
 def get_base_dir():
 	# Get the base directory of the project
-	return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+	return os.path.dirname(os.path.dirname(__file__))
 
 
 # Load the malware samples sha256 value
